@@ -1,7 +1,7 @@
 library(httr)
 library(jsonlite)
 
-# Define your LLM API key here
+# Define your OpenAI API key here
 api_key <- "sk-xxx"
 
 # Global counter variable
@@ -13,7 +13,7 @@ system_request <- readLines("request_template.txt")
 full_system_request <- paste(system_request, collapse = "\n")
 
 analyze_text_with_chatgpt <- function(Title, Abstract) {
-
+  
   decisions <- vector("character", 7)
   #repeat 7 times the query to ChatGPT
   for (i in 1:7) {
@@ -22,107 +22,107 @@ analyze_text_with_chatgpt <- function(Title, Abstract) {
     max_retries <- 3  # Set maximum number of retries
     while (!valid_response_received && retries < max_retries) {
       
-     # Set up the messages for ChatGPT analysis
-    messages <- list(
-      list(role = "system", content = full_system_request), 
-      list(role = "user", content = paste0("classify the paper based on the title: '", Title, "' and abstract: '", Abstract, "'"))
-    )
-    
-    response <- tryCatch({
-      POST(
-        url = "https://api.openai.com/v1/chat/completions",
-        add_headers(
-          "Authorization" = paste0("Bearer ", api_key),
-          "Content-Type" = "application/json"
-        ),
-        body = list(
-          model = "gpt-3.5-turbo",
-          messages = messages,
-          temperature = 0.5,
-          max_tokens = 1000  # Limit the response to 800 tokens
-        ),
-        encode = "json",
-        timeout(50)  # Set a timeout of 30 seconds for the API call
+      # Set up the messages for ChatGPT analysis
+      messages <- list(
+        list(role = "system", content = full_system_request), 
+        list(role = "user", content = paste0("classify the paper based on the title: '", Title, "' and abstract: '", Abstract, "'"))
       )
-    }, error = function(e) {
-      if (grepl("Timeout was reached", e$message)) {
-        print(paste("Timeout error on refline:", counter))
-        retries <- retries + 1
-        Sys.sleep(2^retries)  # Exponential backoff
+      
+      response <- tryCatch({
+        POST(
+          url = "https://api.openai.com/v1/chat/completions",
+          add_headers(
+            "Authorization" = paste0("Bearer ", api_key),
+            "Content-Type" = "application/json"
+          ),
+          body = list(
+            model = "gpt-3.5-turbo",
+            messages = messages,
+            temperature = 0.5,
+            max_tokens = 1000  # Limit the response to 800 tokens
+          ),
+          encode = "json",
+          timeout(50)  # Set a timeout of 30 seconds for the API call
+        )
+      }, error = function(e) {
+        if (grepl("Timeout was reached", e$message)) {
+          print(paste("Timeout error on refline:", counter))
+          retries <- retries + 1
+          Sys.sleep(2^retries)  # Exponential backoff
+        } else {
+          print(paste("refline :", counter))
+          print("Error with title:")
+          print("Error with abstract:")
+          print(e$message)
+          decisions[i] <- "error"
+          Sys.sleep(3)
+        }
+        NULL
+      })
+      Sys.sleep(2)
+      print (content(response)$choices[[1]]$message$content)
+      # Check if the response has the expected structure
+      if (!is.null(response) && "choices" %in% names(content(response))) {
+        response_text <- content(response)$choices[[1]]$message$content
+        
+        # Check for empty or null response_text
+        if (is.null(response_text) || response_text == "") {
+          print(paste("No response text for title:", Title, "Retrying..."))
+          retries <- retries + 1
+          Sys.sleep(2)  # Optional: Sleep for 2 seconds before retrying
+        } else {
+          # Valid response received, exit while loop
+          valid_response_received <- TRUE
+          
+          # Use regex to identify the decision (selected, rejected, uncertain) anywhere in the response
+          classification <- regmatches(response_text, gregexpr("(Selected|selected|Rejected|rejected|Uncertain|uncertain)", response_text))
+          
+          # Check if decision is extracted
+          if (length(classification[[1]]) > 0) {
+            decisions[i] <- tolower(classification[[1]][1])
+          } else {
+            decisions[i] <- "unexpected_response"
+            print(paste("Unexpected response for title:", Title))
+            print(response_text)
+          }
+        }
       } else {
-        print(paste("refline :", counter))
-        print("Error with title:")
-        print("Error with abstract:")
-        print(e$message)
-        decisions[i] <- "error"
-        Sys.sleep(3)
-      }
-      NULL
-    })
-    Sys.sleep(2)
-    print (content(response)$choices[[1]]$message$content)
-    # Check if the response has the expected structure
-    if (!is.null(response) && "choices" %in% names(content(response))) {
-      response_text <- content(response)$choices[[1]]$message$content
-     
-      # Check for empty or null response_text
-      if (is.null(response_text) || response_text == "") {
-        print(paste("No response text for title:", Title, "Retrying..."))
+        print("Unexpected API response structure. Retrying...")
         retries <- retries + 1
         Sys.sleep(2)  # Optional: Sleep for 2 seconds before retrying
-      } else {
-        # Valid response received, exit while loop
-        valid_response_received <- TRUE
-        
-        # Use regex to identify the decision (selected, rejected, uncertain) anywhere in the response
-        classification <- regmatches(response_text, gregexpr("(Selected|selected|Rejected|rejected|Uncertain|uncertain)", response_text))
-        
-        # Check if decision is extracted
-        if (length(classification[[1]]) > 0) {
-          decisions[i] <- tolower(classification[[1]][1])
-        } else {
-          decisions[i] <- "unexpected_response"
-          print(paste("Unexpected response for title:", Title))
-          print(response_text)
-        }
       }
-    } else {
-      print("Unexpected API response structure. Retrying...")
-      retries <- retries + 1
-      Sys.sleep(2)  # Optional: Sleep for 2 seconds before retrying
-    }
     }  # End of while loop
     # If after max retries, still no valid response, return error decision
     if (!valid_response_received) {
       return(list(Decision = "error", Comment = "Max retries reached without a valid response"))
     }   
-
-  # Filter out NA values but retain "error" and "unexpected_response" for transparency
-  decisions <- decisions[!is.na(decisions)]
-  
-  # Filter out "error" and "unexpected_response" for the decision-making process
-  valid_decisions <- decisions[!decisions %in% c("error", "unexpected_response")]
-  
-  # Determine the final decision based on the new criteria
-  total_responses <- length(valid_decisions)
-  selected_percentage <- sum(valid_decisions == "selected") / total_responses
-  rejected_percentage <- sum(valid_decisions == "rejected") / total_responses
-  
-  if (selected_percentage >= 0.7) {
-    final_decision <- "selected"
-  } else if (rejected_percentage >= 0.7) {
-    final_decision <- "rejected"
-  } else {
-    final_decision <- "uncertain"
-  }
+    
+    # Filter out NA values but retain "error" and "unexpected_response" for transparency
+    decisions <- decisions[!is.na(decisions)]
+    
+    # Filter out "error" and "unexpected_response" for the decision-making process
+    valid_decisions <- decisions[!decisions %in% c("error", "unexpected_response")]
+    
+    # Determine the final decision based on the new criteria
+    total_responses <- length(valid_decisions)
+    selected_percentage <- sum(valid_decisions == "selected") / total_responses
+    rejected_percentage <- sum(valid_decisions == "rejected") / total_responses
+    
+    if (selected_percentage >= 0.7) {
+      final_decision <- "selected"
+    } else if (rejected_percentage >= 0.7) {
+      final_decision <- "rejected"
+    } else {
+      final_decision <- "uncertain"
+    }
   } # End of for loop
- 
-   # Counter and printing decisions
+  
+  # Counter and printing decisions
   .GlobalEnv$counter <- .GlobalEnv$counter + 1
   percentage_completion <- (.GlobalEnv$counter / nrow(data)) * 100
   print(paste(round(percentage_completion, 2), "% completed"))
   print(paste("final decision is ", final_decision))
-
+  
   # Return the most frequent decision and its associated comment
   return(list(Decision = final_decision, Comment = paste("Decision based on", length(decisions), "runs:", paste(decisions, collapse=", "))))
 }
