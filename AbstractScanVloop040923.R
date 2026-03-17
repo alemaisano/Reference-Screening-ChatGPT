@@ -1,27 +1,17 @@
 # ============================================================
-# LLM-assisted screening and coding pipeline for papers
+# Batch LLM-assisted screening and coding pipeline
 # Topic: road networks + biodiversity / ecological connectivity
-# Model: Google Gemini 2.5 Flash
+# Model: Gemini 2.5 Flash Lite
+# Strategy: 10 papers per request, JSON array output
 # ============================================================
 
-# Load required libraries:
-# - httr: used to send HTTP requests to the Gemini API
-# - jsonlite: used to convert R objects to JSON and parse JSON responses
 library(httr)
 library(jsonlite)
 
 # ------------------------------------------------------------
 # 1. API KEY
 # ------------------------------------------------------------
-
-# Read the Google API key from the environment variable.
-# IMPORTANT:
-# Do NOT hardcode your API key directly in the script.
-# Instead, save it in your .Renviron file as:
-# GOOGLE_API_KEY=your_key_here
 api_key <- Sys.getenv("GOOGLE_API_KEY")
-
-# Stop the script immediately if the API key is missing.
 if (api_key == "") {
   stop("GOOGLE_API_KEY not found. Please add it to your .Renviron file.")
 }
@@ -29,98 +19,44 @@ if (api_key == "") {
 # ------------------------------------------------------------
 # 2. MODEL SELECTION
 # ------------------------------------------------------------
-
-# Define the Gemini model to use.
-# For your prototype, Gemini 2.5 Flash Lite is a good balance of cost and speed.
+# Flash-lite is usually a better choice for high-throughput screening
 model_name <- "gemini-2.5-flash-lite"
 
 # ------------------------------------------------------------
-# 3. GLOBAL COUNTER
+# 3. SETTINGS
 # ------------------------------------------------------------
-
-# Global counter used to print progress while iterating through papers.
-counter <- 0
+batch_size <- 10
+max_retries <- 3
+sleep_between_requests <- 5   # helps with RPM limits
+output_file_csv <- "output/screened_and_coded_output_batch.csv"
+output_file_tsv <- "output/screened_and_coded_output_batch.txt"
 
 # ------------------------------------------------------------
 # 4. LOAD THE SYSTEM PROMPT
 # ------------------------------------------------------------
-
-# Read the external prompt file containing the review instructions.
-# This prompt should define:
-# - inclusion / exclusion criteria
-# - coding categories
-# - required JSON output format
 system_request <- readLines(
   "prompts/prototype_roadnet_biodconnectivity.txt",
   warn = FALSE
 )
-
-# Collapse the prompt into one single string so it can be passed to the API.
 full_system_request <- paste(system_request, collapse = "\n")
 
 # ------------------------------------------------------------
-# 5. HELPER FUNCTION:
-#    Safely extract the text content from the Gemini response
+# 5. HELPER: safe JSON parsing
 # ------------------------------------------------------------
-
-safe_extract_text <- function(parsed_response) {
-  # Gemini responses are nested in a structure like:
-  # candidates[[1]]$content$parts[[1]]$text
-  #
-  # This helper function safely checks whether the expected fields exist.
-  # If the response structure is incomplete or unexpected, it returns NULL
-  # instead of crashing the script.
-  
-  if (!is.null(parsed_response$candidates) &&
-      length(parsed_response$candidates) > 0 &&
-      !is.null(parsed_response$candidates[[1]]$content$parts) &&
-      length(parsed_response$candidates[[1]]$content$parts) > 0 &&
-      !is.null(parsed_response$candidates[[1]]$content$parts[[1]]$text)) {
-    return(parsed_response$candidates[[1]]$content$parts[[1]]$text)
-  }
-  
-  return(NULL)
-}
-
-# ------------------------------------------------------------
-# 6. HELPER FUNCTION:
-#    Safely parse the model output as JSON
-# ------------------------------------------------------------
-
 safe_parse_json <- function(text_output) {
-  # Even when instructed to return only JSON, the model may sometimes wrap
-  # the output inside markdown code fences, such as:
-  #
-  # ```json
-  # {...}
-  # ```
-  #
-  # This function removes those wrappers and then tries to parse the JSON.
-  # If parsing fails, it returns NULL.
-  
   cleaned_text <- gsub("^```json\\s*|^```\\s*|\\s*```$", "", text_output)
   cleaned_text <- trimws(cleaned_text)
   
   tryCatch(
-    fromJSON(cleaned_text),
+    fromJSON(cleaned_text, simplifyDataFrame = TRUE),
     error = function(e) NULL
   )
 }
 
 # ------------------------------------------------------------
-# 7. HELPER FUNCTION:
-#    Normalize and validate one field returned by the model
+# 6. HELPER: normalize one field
 # ------------------------------------------------------------
-
 normalize_field <- function(value, allowed = NULL, default = "unclear") {
-  # This function standardizes values returned by the model:
-  # - converts them to lowercase
-  # - trims whitespace
-  # - checks whether they belong to an allowed set
-  #
-  # If the value is missing, empty, or outside the allowed values,
-  # it returns the specified default value.
-  
   if (is.null(value) || length(value) == 0 || is.na(value) || trimws(value) == "") {
     return(default)
   }
@@ -131,69 +67,178 @@ normalize_field <- function(value, allowed = NULL, default = "unclear") {
     return(default)
   }
   
-  return(value)
+  value
 }
 
 # ------------------------------------------------------------
-# 8. MAIN FUNCTION:
-#    Analyze one paper with Gemini
+# 7. HELPER: build empty fallback rows for a failed batch
 # ------------------------------------------------------------
-
-analyze_text_with_gemini <- function(Code, Title, Abstract, total_n) {
-  
-  # Number of retries allowed in case of API issues or invalid output
-  retries <- 0
-  max_retries <- 3
-  
-  # Track whether we successfully received a valid answer
-  valid_response_received <- FALSE
-  
-  # Default result structure.
-  # This ensures that even in case of repeated failure,
-  # the function always returns the same fields.
-  result <- list(
+build_fallback_batch <- function(batch_df, raw_response = "", error_msg = "invalid_json") {
+  data.frame(
+    Code = batch_df$Code,
     Decision = "error",
-    Reason = "No valid response received",
+    Reason = error_msg,
     IntegrationType = "unclear",
     SpatialScale = "unclear",
     MethodType = "unclear",
     InteractionDirection = "unclear",
     ConnectivityFocus = "unclear",
-    Notes = ""
+    Notes = "",
+    RawModelOutput = raw_response,
+    stringsAsFactors = FALSE
+  )
+}
+
+# ------------------------------------------------------------
+# 8. HELPER: standardize parsed batch output
+# ------------------------------------------------------------
+standardize_batch_output <- function(parsed_json, batch_df, raw_response = "") {
+  # We expect a JSON array / dataframe with one row per paper.
+  # If structure is wrong, return fallback rows.
+  if (is.null(parsed_json)) {
+    return(build_fallback_batch(batch_df, raw_response, "parsed_json_null"))
+  }
+  
+  if (!is.data.frame(parsed_json)) {
+    # Try coercion if parsed_json is a list of objects
+    parsed_json <- tryCatch(as.data.frame(parsed_json, stringsAsFactors = FALSE), error = function(e) NULL)
+    if (is.null(parsed_json)) {
+      return(build_fallback_batch(batch_df, raw_response, "parsed_json_not_dataframe"))
+    }
+  }
+  
+  required_cols <- c(
+    "code", "decision", "reason", "integration_type",
+    "spatial_scale", "method_type", "interaction_direction",
+    "connectivity_focus", "notes"
   )
   
-  # Retry loop
-  while (!valid_response_received && retries < max_retries) {
+  missing_cols <- setdiff(required_cols, names(parsed_json))
+  if (length(missing_cols) > 0) {
+    return(build_fallback_batch(
+      batch_df,
+      raw_response,
+      paste("missing_cols:", paste(missing_cols, collapse = ","))
+    ))
+  }
+  
+  # Keep only relevant columns
+  parsed_json <- parsed_json[, required_cols, drop = FALSE]
+  
+  # Normalize code
+  parsed_json$code <- as.character(parsed_json$code)
+  
+  # Match parsed rows back to the original batch order
+  merged <- merge(
+    batch_df[, "Code", drop = FALSE],
+    parsed_json,
+    by.x = "Code",
+    by.y = "code",
+    all.x = TRUE,
+    sort = FALSE
+  )
+  
+  # Normalize fields
+  merged$Decision <- vapply(
+    merged$decision,
+    normalize_field,
+    character(1),
+    allowed = c("accepted", "rejected", "unsure"),
+    default = "unsure"
+  )
+  
+  merged$Reason <- ifelse(is.na(merged$reason), "", as.character(merged$reason))
+  
+  merged$IntegrationType <- vapply(
+    merged$integration_type,
+    normalize_field,
+    character(1),
+    allowed = c("conceptual", "analytical", "sequential", "soft_coupling", "strong_coupling", "unclear"),
+    default = "unclear"
+  )
+  
+  merged$SpatialScale <- vapply(
+    merged$spatial_scale,
+    normalize_field,
+    character(1),
+    allowed = c("local", "regional", "supraregional", "multiple", "unclear"),
+    default = "unclear"
+  )
+  
+  merged$MethodType <- vapply(
+    merged$method_type,
+    normalize_field,
+    character(1),
+    allowed = c("empirical", "modeling", "review", "conceptual", "mixed", "unclear"),
+    default = "unclear"
+  )
+  
+  merged$InteractionDirection <- vapply(
+    merged$interaction_direction,
+    normalize_field,
+    character(1),
+    allowed = c("transport_to_ecosystem", "ecosystem_to_transport", "bidirectional", "unclear"),
+    default = "unclear"
+  )
+  
+  merged$ConnectivityFocus <- vapply(
+    merged$connectivity_focus,
+    normalize_field,
+    character(1),
+    allowed = c("yes", "no", "partial", "unclear"),
+    default = "unclear"
+  )
+  
+  merged$Notes <- ifelse(is.na(merged$notes), "", as.character(merged$notes))
+  merged$RawModelOutput <- raw_response
+  
+  # Fill any missing rows with fallback values
+  merged$Decision[is.na(merged$Decision)] <- "error"
+  merged$Reason[is.na(merged$Reason)] <- "missing_row_in_json"
+  merged$IntegrationType[is.na(merged$IntegrationType)] <- "unclear"
+  merged$SpatialScale[is.na(merged$SpatialScale)] <- "unclear"
+  merged$MethodType[is.na(merged$MethodType)] <- "unclear"
+  merged$InteractionDirection[is.na(merged$InteractionDirection)] <- "unclear"
+  merged$ConnectivityFocus[is.na(merged$ConnectivityFocus)] <- "unclear"
+  merged$Notes[is.na(merged$Notes)] <- ""
+  
+  merged[, c(
+    "Code", "Decision", "Reason", "IntegrationType",
+    "SpatialScale", "MethodType", "InteractionDirection",
+    "ConnectivityFocus", "Notes", "RawModelOutput"
+  )]
+}
+
+# ------------------------------------------------------------
+# 9. HELPER: build one batch prompt
+# ------------------------------------------------------------
+build_batch_prompt <- function(batch_df) {
+  # Build a compact but structured prompt for multiple papers
+  paper_blocks <- paste0(
+    "PAPER CODE: ", batch_df$Code, "\n",
+    "TITLE: ", batch_df$Title, "\n",
+    "ABSTRACT: ", batch_df$Abstract,
+    collapse = "\n\n--------------------\n\n"
+  )
+  
+  paste0(
+    "Classify the following papers.\n",
+    "Return only a valid JSON array.\n\n",
+    paper_blocks
+  )
+}
+
+# ------------------------------------------------------------
+# 10. MAIN FUNCTION: analyze one batch of papers
+# ------------------------------------------------------------
+analyze_batch_with_gemini <- function(batch_df) {
+  retries <- 0
+  raw_response_text <- ""
+  
+  while (retries < max_retries) {
+    user_prompt <- build_batch_prompt(batch_df)
     
-    # --------------------------------------------------------
-    # Build the user prompt for the current paper
-    # --------------------------------------------------------
-    #
-    # We provide:
-    # - paper code (for traceability)
-    # - title
-    # - abstract
-    # - explicit instruction to return only JSON
-    user_prompt <- paste0(
-      "PAPER CODE: ", Code, "\n\n",
-      "TITLE:\n", Title, "\n\n",
-      "ABSTRACT:\n", Abstract, "\n\n",
-      "Classify this paper and return only valid JSON."
-    )
-    
-    # --------------------------------------------------------
-    # Build the Gemini request body
-    # --------------------------------------------------------
-    #
-    # system_instruction:
-    #   contains the global screening/coding instructions
-    #
-    # contents:
-    #   contains the specific paper currently being analyzed
-    #
-    # generationConfig:
-    #   temperature = 0 for deterministic / stable responses
-    #   maxOutputTokens limits output length
+    # Strong schema constraint to reduce invalid JSON
     body <- list(
       system_instruction = list(
         parts = list(
@@ -210,13 +255,54 @@ analyze_text_with_gemini <- function(Code, Title, Abstract, total_n) {
       ),
       generationConfig = list(
         temperature = 0,
-        maxOutputTokens = 800
+        maxOutputTokens = 2500,
+        responseMimeType = "application/json",
+        responseSchema = list(
+          type = "ARRAY",
+          items = list(
+            type = "OBJECT",
+            properties = list(
+              code = list(type = "STRING"),
+              decision = list(
+                type = "STRING",
+                enum = list("accepted", "rejected", "unsure")
+              ),
+              reason = list(type = "STRING"),
+              integration_type = list(
+                type = "STRING",
+                enum = list(
+                  "conceptual", "analytical", "sequential",
+                  "soft_coupling", "strong_coupling", "unclear"
+                )
+              ),
+              spatial_scale = list(
+                type = "STRING",
+                enum = list("local", "regional", "supraregional", "multiple", "unclear")
+              ),
+              method_type = list(
+                type = "STRING",
+                enum = list("empirical", "modeling", "review", "conceptual", "mixed", "unclear")
+              ),
+              interaction_direction = list(
+                type = "STRING",
+                enum = list("transport_to_ecosystem", "ecosystem_to_transport", "bidirectional", "unclear")
+              ),
+              connectivity_focus = list(
+                type = "STRING",
+                enum = list("yes", "no", "partial", "unclear")
+              ),
+              notes = list(type = "STRING")
+            ),
+            required = list(
+              "code", "decision", "reason", "integration_type",
+              "spatial_scale", "method_type", "interaction_direction",
+              "connectivity_focus", "notes"
+            )
+          )
+        )
       )
     )
     
-    # --------------------------------------------------------
-    # Send the POST request to the Gemini API
-    # --------------------------------------------------------
     response <- tryCatch({
       POST(
         url = paste0(
@@ -229,277 +315,157 @@ analyze_text_with_gemini <- function(Code, Title, Abstract, total_n) {
           "Content-Type" = "application/json"
         ),
         body = toJSON(body, auto_unbox = TRUE, null = "null"),
-        timeout(50)
+        timeout(60)
       )
     }, error = function(e) {
-      message("Request error for ", Code, ": ", e$message)
+      message("Request error: ", e$message)
       NULL
     })
     
-    # If the request itself failed, retry
     if (is.null(response)) {
       retries <- retries + 1
-      Sys.sleep(2^retries)
+      Sys.sleep(10 * retries)
       next
     }
     
-    # --------------------------------------------------------
-    # Parse the raw HTTP response into an R object
-    # --------------------------------------------------------
     parsed_response <- tryCatch(
       content(response, as = "parsed", type = "application/json"),
       error = function(e) NULL
     )
     
-    # --------------------------------------------------------
-    # Handle HTTP-level errors
-    # --------------------------------------------------------
+    # Handle 429 / rate limits explicitly
+    if (status_code(response) == 429) {
+      message("Rate limit hit. Waiting before retry...")
+      retries <- retries + 1
+      Sys.sleep(30 * retries)
+      next
+    }
+    
     if (status_code(response) >= 400) {
-      message("HTTP error ", status_code(response), " for ", Code)
-      
+      message("HTTP error ", status_code(response))
       if (!is.null(parsed_response$error$message)) {
         message("API message: ", parsed_response$error$message)
       }
-      
       retries <- retries + 1
-      Sys.sleep(2^retries)
+      Sys.sleep(10 * retries)
       next
     }
     
-    # --------------------------------------------------------
-    # Extract the textual content returned by the model
-    # --------------------------------------------------------
-    response_text <- safe_extract_text(parsed_response)
+    # Gemini text is usually here
+    raw_response_text <- NULL
+    if (!is.null(parsed_response$candidates) &&
+        length(parsed_response$candidates) > 0 &&
+        !is.null(parsed_response$candidates[[1]]$content$parts) &&
+        length(parsed_response$candidates[[1]]$content$parts) > 0 &&
+        !is.null(parsed_response$candidates[[1]]$content$parts[[1]]$text)) {
+      raw_response_text <- parsed_response$candidates[[1]]$content$parts[[1]]$text
+    }
     
-    if (is.null(response_text) || response_text == "") {
-      message("Empty response text for ", Code)
+    if (is.null(raw_response_text) || raw_response_text == "") {
+      message("Empty response text.")
       retries <- retries + 1
-      Sys.sleep(2^retries)
+      Sys.sleep(10 * retries)
       next
     }
     
-    # Print model output for debugging / transparency
-    print(response_text)
+    # Print a compact debug message only
+    message("Raw response received for batch starting with ", batch_df$Code[1])
     
-    # --------------------------------------------------------
-    # Parse the model output as JSON
-    # --------------------------------------------------------
-    parsed_json <- safe_parse_json(response_text)
+    parsed_json <- safe_parse_json(raw_response_text)
     
     if (is.null(parsed_json)) {
-      message("Invalid JSON returned for ", Code)
+      message("Invalid JSON for batch starting with ", batch_df$Code[1])
       retries <- retries + 1
-      Sys.sleep(2^retries)
+      Sys.sleep(10 * retries)
       next
     }
     
-    # --------------------------------------------------------
-    # Extract and normalize each field returned by the model
-    # --------------------------------------------------------
-    
-    # Screening decision
-    result$Decision <- normalize_field(
-      parsed_json$decision,
-      allowed = c("accepted", "rejected", "unsure"),
-      default = "unsure"
-    )
-    
-    # Short reason for the decision
-    result$Reason <- ifelse(
-      is.null(parsed_json$reason),
-      "",
-      as.character(parsed_json$reason)
-    )
-    
-    # Integration type:
-    # conceptual / analytical / sequential / soft_coupling / strong_coupling / unclear
-    result$IntegrationType <- normalize_field(
-      parsed_json$integration_type,
-      allowed = c(
-        "conceptual",
-        "analytical",
-        "sequential",
-        "soft_coupling",
-        "strong_coupling",
-        "unclear"
-      ),
-      default = "unclear"
-    )
-    
-    # Spatial scale:
-    # local / regional / supraregional / multiple / unclear
-    result$SpatialScale <- normalize_field(
-      parsed_json$spatial_scale,
-      allowed = c("local", "regional", "supraregional", "multiple", "unclear"),
-      default = "unclear"
-    )
-    
-    # Method type:
-    # empirical / modeling / review / conceptual / mixed / unclear
-    result$MethodType <- normalize_field(
-      parsed_json$method_type,
-      allowed = c("empirical", "modeling", "review", "conceptual", "mixed", "unclear"),
-      default = "unclear"
-    )
-    
-    # Interaction direction:
-    # transport_to_ecosystem / ecosystem_to_transport / bidirectional / unclear
-    result$InteractionDirection <- normalize_field(
-      parsed_json$interaction_direction,
-      allowed = c("transport_to_ecosystem", "ecosystem_to_transport", "bidirectional", "unclear"),
-      default = "unclear"
-    )
-    
-    # Whether ecological connectivity is central in the paper
-    result$ConnectivityFocus <- normalize_field(
-      parsed_json$connectivity_focus,
-      allowed = c("yes", "no", "partial", "unclear"),
-      default = "unclear"
-    )
-    
-    # Additional notes
-    result$Notes <- ifelse(
-      is.null(parsed_json$notes),
-      "",
-      as.character(parsed_json$notes)
-    )
-    
-    # Mark as valid and exit the retry loop
-    valid_response_received <- TRUE
+    # Success
+    Sys.sleep(sleep_between_requests)
+    return(standardize_batch_output(parsed_json, batch_df, raw_response_text))
   }
   
-  # ----------------------------------------------------------
-  # Update progress counter and print completion status
-  # ----------------------------------------------------------
-  .GlobalEnv$counter <- .GlobalEnv$counter + 1
-  percentage_completion <- (.GlobalEnv$counter / total_n) * 100
-  
-  message(
-    round(percentage_completion, 2),
-    "% completed - ",
-    Code,
-    " -> ",
-    result$Decision
-  )
-  
-  return(result)
+  # If all retries failed
+  build_fallback_batch(batch_df, raw_response_text, "max_retries_reached")
 }
 
 # ------------------------------------------------------------
-# 9. READ THE INPUT DATASET
+# 11. READ INPUT DATASET
 # ------------------------------------------------------------
-
-# Read the CSV file containing your paper dataset.
-#
-# IMPORTANT:
-# If your file actually has a .csv extension, use:
-# "database_output_raw/scopus_export_prototype.csv"
-#
-# If your file has no extension, keep the current path as written below.
-data <- read.csv("database_output_raw/scopus_export_prototype.csv",
+data <- read.csv(
+  "database_output_raw/scopus_export_prototype_1.csv",
   stringsAsFactors = FALSE
 )
 
-# Print column names so you can inspect them if needed
+# Optional: inspect names if needed
 print(names(data))
 
-# ------------------------------------------------------------
-# 10. OPTIONAL COLUMN RENAMING
-# ------------------------------------------------------------
-#
-# Uncomment and adapt these lines if your CSV uses different column names.
-# For example, if Scopus exports them differently.
-#
+# If necessary, rename columns here
 # names(data)[names(data) == "Document Title"] <- "Title"
-# names(data)[names(data) == "Abstract"] <- "Abstract"
 # names(data)[names(data) == "Year"] <- "Year"
 
-# ------------------------------------------------------------
-# 11. CLEAN THE DATA
-# ------------------------------------------------------------
-
-# Remove rows with missing or empty abstracts
+# Keep only rows with title and abstract
 data <- data[!is.na(data$Abstract) & data$Abstract != "", ]
-
-# Remove rows with missing or empty titles
 data <- data[!is.na(data$Title) & data$Title != "", ]
 
-# If the dataset does not contain a Code column, create one automatically
+# Create Code if missing
 if (!"Code" %in% names(data)) {
   data$Code <- paste0("P", seq_len(nrow(data)))
 }
 
-# ------------------------------------------------------------
-# 12. APPLY THE GEMINI ANALYSIS TO ALL PAPERS
-# ------------------------------------------------------------
+# Optional: shorten very long abstracts to reduce tokens
+truncate_text <- function(x, max_chars = 2500) {
+  ifelse(nchar(x) > max_chars, substr(x, 1, max_chars), x)
+}
+data$Abstract <- truncate_text(data$Abstract, max_chars = 2500)
 
-results <- mapply(
-  FUN = analyze_text_with_gemini,
-  Code = data$Code,
-  Title = data$Title,
-  Abstract = data$Abstract,
-  MoreArgs = list(total_n = nrow(data)),
-  SIMPLIFY = FALSE
-)
-
-# ------------------------------------------------------------
-# 13. ADD THE MODEL OUTPUT AS NEW COLUMNS
-# ------------------------------------------------------------
-
-data$Decision <- sapply(results, `[[`, "Decision")
-data$Reason <- sapply(results, `[[`, "Reason")
-data$IntegrationType <- sapply(results, `[[`, "IntegrationType")
-data$SpatialScale <- sapply(results, `[[`, "SpatialScale")
-data$MethodType <- sapply(results, `[[`, "MethodType")
-data$InteractionDirection <- sapply(results, `[[`, "InteractionDirection")
-data$ConnectivityFocus <- sapply(results, `[[`, "ConnectivityFocus")
-data$Notes <- sapply(results, `[[`, "Notes")
+# Initialize output columns now, so you can inspect progress while running
+data$Decision <- NA_character_
+data$Reason <- NA_character_
+data$IntegrationType <- NA_character_
+data$SpatialScale <- NA_character_
+data$MethodType <- NA_character_
+data$InteractionDirection <- NA_character_
+data$ConnectivityFocus <- NA_character_
+data$Notes <- NA_character_
+data$RawModelOutput <- NA_character_
 
 # ------------------------------------------------------------
-# 14. DEFINE OUTPUT COLUMNS
+# 12. PROCESS IN BATCHES OF 10
 # ------------------------------------------------------------
+n <- nrow(data)
+batch_starts <- seq(1, n, by = batch_size)
 
-# Start with a core set of columns we definitely want in the output.
-output_cols <- c(
-  "Code",
-  "Title",
-  "Decision",
-  "Reason",
-  "IntegrationType",
-  "SpatialScale",
-  "MethodType",
-  "InteractionDirection",
-  "ConnectivityFocus",
-  "Notes"
-)
-
-# If Year exists in the input dataset, include it in the output.
-if ("Year" %in% names(data)) {
-  output_cols <- append(output_cols, "Year", after = 2)
+for (start_idx in batch_starts) {
+  end_idx <- min(start_idx + batch_size - 1, n)
+  batch_df <- data[start_idx:end_idx, c("Code", "Title", "Abstract"), drop = FALSE]
+  
+  message("Processing batch: rows ", start_idx, " to ", end_idx)
+  
+  batch_results <- analyze_batch_with_gemini(batch_df)
+  
+  # Write results back into the original dataframe
+  match_idx <- match(batch_results$Code, data$Code)
+  
+  data$Decision[match_idx] <- batch_results$Decision
+  data$Reason[match_idx] <- batch_results$Reason
+  data$IntegrationType[match_idx] <- batch_results$IntegrationType
+  data$SpatialScale[match_idx] <- batch_results$SpatialScale
+  data$MethodType[match_idx] <- batch_results$MethodType
+  data$InteractionDirection[match_idx] <- batch_results$InteractionDirection
+  data$ConnectivityFocus[match_idx] <- batch_results$ConnectivityFocus
+  data$Notes[match_idx] <- batch_results$Notes
+  data$RawModelOutput[match_idx] <- batch_results$RawModelOutput
+  
+  # Save partial output after every batch
+  write.csv(data, output_file_csv, row.names = FALSE)
+  write.table(data, output_file_tsv, sep = "\t", row.names = FALSE, quote = FALSE)
+  
+  percentage_completion <- round((end_idx / n) * 100, 2)
+  message(percentage_completion, "% completed")
 }
 
 # ------------------------------------------------------------
-# 15. WRITE THE OUTPUT FILE
+# 13. FINAL OUTPUT
 # ------------------------------------------------------------
-
-# Save the final screened and coded dataset as a tab-separated text file.
-# Tab-separated output is often safer than CSV because abstracts may contain commas.
-write.table(
-  data[, output_cols],
-  "output/screened_and_coded_output.txt",
-  sep = "\t",
-  row.names = FALSE,
-  quote = FALSE
-)
-
-# Optional: also save a CSV version if you want
-write.csv(
-  data[, output_cols],
-  "output/screened_and_coded_output.csv",
-  row.names = FALSE
-)
-
-# ------------------------------------------------------------
-# END OF SCRIPT
-# ------------------------------------------------------------
-message("Screening and coding completed successfully.")
+message("Batch screening and coding completed successfully.")
