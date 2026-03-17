@@ -1,0 +1,45 @@
+You are assisting a literature review on modeling approaches linking road networks / transport infrastructure with biodiversity connectivity.
+
+Scope:
+We are interested in papers that analyze, model, assess, or simulate relationships between:
+- road networks / transport infrastructure 
+and
+- habitat connectivity / landscape connectivity / ecological connectivity / habitat fragmentation / wildlife corridors / biodiversity connectivity.
+
+Inclusion criteria:
+- The paper is relevant to both road or transport infrastructure and biodiversity/ecological connectivity.
+- The paper may present the integration in a conceptual way, or by modeling the interaction through analytical, sequential, soft-coupled, or strongly coupled models.
+- The paper may be empirical, modeling, review, or methodological, but must be useful for classifying the interaction/modeling approach.
+
+Definitions:
+- conceptual: discusses relationships conceptually, without operational integration
+- analytical: separate analyses/overlays/comparisons, no real model coupling
+- sequential: one model/analysis feeds another in one direction
+- soft_coupling: iterative or loosely linked exchange between components/models
+- strong_coupling: tightly integrated or dynamically coupled interaction during simulation/analysis
+
+Exclusion criteria:
+- Only transport, with no biodiversity/ecological connectivity relevance.
+- Only ecology, with no road/transport infrastructure relevance.
+- Not enough information in title/abstract to judge relevance.
+
+Classify the paper using title, abstract and keywords.
+
+Return ONLY valid JSON with exactly these keys:
+
+{
+  "decision": "accepted | rejected | unsure",
+  "reason": "short explanation",
+  "integration_type": "conceptual | analytical | sequential | soft_coupling | strong_coupling | unclear",
+  "spatial_scale": "local | regional | supraregional | multiple | unclear",
+  "method_type": "empirical | modeling | review | conceptual | mixed | unclear",
+  "interaction_direction": "transport_to_ecosystem | ecosystem_to_transport | bidirectional | unclear",
+  "connectivity_focus": "yes | no | partial | unclear",
+  "notes": "short note"
+}
+
+
+Be conservative:
+- if uncertain, use "unsure"
+- if integration type is unclear, use "unclear"
+- do not invent details not present in title/abstract

@@ -1,142 +1,506 @@
+# ============================================================
+# LLM-assisted screening and coding pipeline for papers
+# Topic: road networks + biodiversity / ecological connectivity
+# Model: Google Gemini 2.5 Flash
+# ============================================================
+
+# Load required libraries:
+# - httr: used to send HTTP requests to the Gemini API
+# - jsonlite: used to convert R objects to JSON and parse JSON responses
 library(httr)
 library(jsonlite)
 
-# Define your OpenAI API key here
-api_key <- "sk-xxx"
+# ------------------------------------------------------------
+# 1. API KEY
+# ------------------------------------------------------------
 
-# Global counter variable
-counter <- 0
+# Read the Google API key from the environment variable.
+# IMPORTANT:
+# Do NOT hardcode your API key directly in the script.
+# Instead, save it in your .Renviron file as:
+# GOOGLE_API_KEY=your_key_here
+api_key <- Sys.getenv("GOOGLE_API_KEY")
 
-# Read the system request from the external request_template.txt file
-system_request <- readLines("request_template.txt")
-# Concatenate the system_request into a single string
-full_system_request <- paste(system_request, collapse = "\n")
-
-analyze_text_with_chatgpt <- function(Title, Abstract) {
-  
-  decisions <- vector("character", 7)
-  #repeat 7 times the query to ChatGPT
-  for (i in 1:7) {
-    valid_response_received <- FALSE
-    retries <- 0
-    max_retries <- 3  # Set maximum number of retries
-    while (!valid_response_received && retries < max_retries) {
-      
-      # Set up the messages for ChatGPT analysis
-      messages <- list(
-        list(role = "system", content = full_system_request), 
-        list(role = "user", content = paste0("classify the paper based on the title: '", Title, "' and abstract: '", Abstract, "'"))
-      )
-      
-      response <- tryCatch({
-        POST(
-          url = "https://api.openai.com/v1/chat/completions",
-          add_headers(
-            "Authorization" = paste0("Bearer ", api_key),
-            "Content-Type" = "application/json"
-          ),
-          body = list(
-            model = "gpt-3.5-turbo",
-            messages = messages,
-            temperature = 0.5,
-            max_tokens = 1000  # Limit the response to 800 tokens
-          ),
-          encode = "json",
-          timeout(50)  # Set a timeout of 30 seconds for the API call
-        )
-      }, error = function(e) {
-        if (grepl("Timeout was reached", e$message)) {
-          print(paste("Timeout error on refline:", counter))
-          retries <- retries + 1
-          Sys.sleep(2^retries)  # Exponential backoff
-        } else {
-          print(paste("refline :", counter))
-          print("Error with title:")
-          print("Error with abstract:")
-          print(e$message)
-          decisions[i] <- "error"
-          Sys.sleep(3)
-        }
-        NULL
-      })
-      Sys.sleep(2)
-      print (content(response)$choices[[1]]$message$content)
-      # Check if the response has the expected structure
-      if (!is.null(response) && "choices" %in% names(content(response))) {
-        response_text <- content(response)$choices[[1]]$message$content
-        
-        # Check for empty or null response_text
-        if (is.null(response_text) || response_text == "") {
-          print(paste("No response text for title:", Title, "Retrying..."))
-          retries <- retries + 1
-          Sys.sleep(2)  # Optional: Sleep for 2 seconds before retrying
-        } else {
-          # Valid response received, exit while loop
-          valid_response_received <- TRUE
-          
-          # Use regex to identify the decision (selected, rejected, uncertain) anywhere in the response
-          classification <- regmatches(response_text, gregexpr("(Selected|selected|Rejected|rejected|Uncertain|uncertain)", response_text))
-          
-          # Check if decision is extracted
-          if (length(classification[[1]]) > 0) {
-            decisions[i] <- tolower(classification[[1]][1])
-          } else {
-            decisions[i] <- "unexpected_response"
-            print(paste("Unexpected response for title:", Title))
-            print(response_text)
-          }
-        }
-      } else {
-        print("Unexpected API response structure. Retrying...")
-        retries <- retries + 1
-        Sys.sleep(2)  # Optional: Sleep for 2 seconds before retrying
-      }
-    }  # End of while loop
-    # If after max retries, still no valid response, return error decision
-    if (!valid_response_received) {
-      return(list(Decision = "error", Comment = "Max retries reached without a valid response"))
-    }   
-    
-    # Filter out NA values but retain "error" and "unexpected_response" for transparency
-    decisions <- decisions[!is.na(decisions)]
-    
-    # Filter out "error" and "unexpected_response" for the decision-making process
-    valid_decisions <- decisions[!decisions %in% c("error", "unexpected_response")]
-    
-    # Determine the final decision based on the new criteria
-    total_responses <- length(valid_decisions)
-    selected_percentage <- sum(valid_decisions == "selected") / total_responses
-    rejected_percentage <- sum(valid_decisions == "rejected") / total_responses
-    
-    if (selected_percentage >= 0.7) {
-      final_decision <- "selected"
-    } else if (rejected_percentage >= 0.7) {
-      final_decision <- "rejected"
-    } else {
-      final_decision <- "uncertain"
-    }
-  } # End of for loop
-  
-  # Counter and printing decisions
-  .GlobalEnv$counter <- .GlobalEnv$counter + 1
-  percentage_completion <- (.GlobalEnv$counter / nrow(data)) * 100
-  print(paste(round(percentage_completion, 2), "% completed"))
-  print(paste("final decision is ", final_decision))
-  
-  # Return the most frequent decision and its associated comment
-  return(list(Decision = final_decision, Comment = paste("Decision based on", length(decisions), "runs:", paste(decisions, collapse=", "))))
+# Stop the script immediately if the API key is missing.
+if (api_key == "") {
+  stop("GOOGLE_API_KEY not found. Please add it to your .Renviron file.")
 }
 
-# Read the .txt file (assuming tab-separated values) containing the list of references with code, Title, Abstract
-data <- read.delim("input.txt", header = TRUE, stringsAsFactors = FALSE)
+# ------------------------------------------------------------
+# 2. MODEL SELECTION
+# ------------------------------------------------------------
+
+# Define the Gemini model to use.
+# For your prototype, Gemini 2.5 Flash is a good balance of cost and speed.
+model_name <- "gemini-2.5-flash"
+
+# ------------------------------------------------------------
+# 3. GLOBAL COUNTER
+# ------------------------------------------------------------
+
+# Global counter used to print progress while iterating through papers.
+counter <- 0
+
+# ------------------------------------------------------------
+# 4. LOAD THE SYSTEM PROMPT
+# ------------------------------------------------------------
+
+# Read the external prompt file containing the review instructions.
+# This prompt should define:
+# - inclusion / exclusion criteria
+# - coding categories
+# - required JSON output format
+system_request <- readLines(
+  "prompts/prototype_roadnet_biodconnectivity.txt",
+  warn = FALSE
+)
+
+# Collapse the prompt into one single string so it can be passed to the API.
+full_system_request <- paste(system_request, collapse = "\n")
+
+# ------------------------------------------------------------
+# 5. HELPER FUNCTION:
+#    Safely extract the text content from the Gemini response
+# ------------------------------------------------------------
+
+safe_extract_text <- function(parsed_response) {
+  # Gemini responses are nested in a structure like:
+  # candidates[[1]]$content$parts[[1]]$text
+  #
+  # This helper function safely checks whether the expected fields exist.
+  # If the response structure is incomplete or unexpected, it returns NULL
+  # instead of crashing the script.
+  
+  if (!is.null(parsed_response$candidates) &&
+      length(parsed_response$candidates) > 0 &&
+      !is.null(parsed_response$candidates[[1]]$content$parts) &&
+      length(parsed_response$candidates[[1]]$content$parts) > 0 &&
+      !is.null(parsed_response$candidates[[1]]$content$parts[[1]]$text)) {
+    return(parsed_response$candidates[[1]]$content$parts[[1]]$text)
+  }
+  
+  return(NULL)
+}
+
+# ------------------------------------------------------------
+# 6. HELPER FUNCTION:
+#    Safely parse the model output as JSON
+# ------------------------------------------------------------
+
+safe_parse_json <- function(text_output) {
+  # Even when instructed to return only JSON, the model may sometimes wrap
+  # the output inside markdown code fences, such as:
+  #
+  # ```json
+  # {...}
+  # ```
+  #
+  # This function removes those wrappers and then tries to parse the JSON.
+  # If parsing fails, it returns NULL.
+  
+  cleaned_text <- gsub("^```json\\s*|^```\\s*|\\s*```$", "", text_output)
+  cleaned_text <- trimws(cleaned_text)
+  
+  tryCatch(
+    fromJSON(cleaned_text),
+    error = function(e) NULL
+  )
+}
+
+# ------------------------------------------------------------
+# 7. HELPER FUNCTION:
+#    Normalize and validate one field returned by the model
+# ------------------------------------------------------------
+
+normalize_field <- function(value, allowed = NULL, default = "unclear") {
+  # This function standardizes values returned by the model:
+  # - converts them to lowercase
+  # - trims whitespace
+  # - checks whether they belong to an allowed set
+  #
+  # If the value is missing, empty, or outside the allowed values,
+  # it returns the specified default value.
+  
+  if (is.null(value) || length(value) == 0 || is.na(value) || trimws(value) == "") {
+    return(default)
+  }
+  
+  value <- trimws(tolower(as.character(value)))
+  
+  if (!is.null(allowed) && !(value %in% allowed)) {
+    return(default)
+  }
+  
+  return(value)
+}
+
+# ------------------------------------------------------------
+# 8. MAIN FUNCTION:
+#    Analyze one paper with Gemini
+# ------------------------------------------------------------
+
+analyze_text_with_gemini <- function(Code, Title, Abstract, total_n) {
+  
+  # Number of retries allowed in case of API issues or invalid output
+  retries <- 0
+  max_retries <- 3
+  
+  # Track whether we successfully received a valid answer
+  valid_response_received <- FALSE
+  
+  # Default result structure.
+  # This ensures that even in case of repeated failure,
+  # the function always returns the same fields.
+  result <- list(
+    Decision = "error",
+    Reason = "No valid response received",
+    IntegrationType = "unclear",
+    SpatialScale = "unclear",
+    MethodType = "unclear",
+    InteractionDirection = "unclear",
+    ConnectivityFocus = "unclear",
+    Notes = ""
+  )
+  
+  # Retry loop
+  while (!valid_response_received && retries < max_retries) {
+    
+    # --------------------------------------------------------
+    # Build the user prompt for the current paper
+    # --------------------------------------------------------
+    #
+    # We provide:
+    # - paper code (for traceability)
+    # - title
+    # - abstract
+    # - explicit instruction to return only JSON
+    user_prompt <- paste0(
+      "PAPER CODE: ", Code, "\n\n",
+      "TITLE:\n", Title, "\n\n",
+      "ABSTRACT:\n", Abstract, "\n\n",
+      "Classify this paper and return only valid JSON."
+    )
+    
+    # --------------------------------------------------------
+    # Build the Gemini request body
+    # --------------------------------------------------------
+    #
+    # system_instruction:
+    #   contains the global screening/coding instructions
+    #
+    # contents:
+    #   contains the specific paper currently being analyzed
+    #
+    # generationConfig:
+    #   temperature = 0 for deterministic / stable responses
+    #   maxOutputTokens limits output length
+    body <- list(
+      system_instruction = list(
+        parts = list(
+          list(text = full_system_request)
+        )
+      ),
+      contents = list(
+        list(
+          role = "user",
+          parts = list(
+            list(text = user_prompt)
+          )
+        )
+      ),
+      generationConfig = list(
+        temperature = 0,
+        maxOutputTokens = 800
+      )
+    )
+    
+    # --------------------------------------------------------
+    # Send the POST request to the Gemini API
+    # --------------------------------------------------------
+    response <- tryCatch({
+      POST(
+        url = paste0(
+          "https://generativelanguage.googleapis.com/v1beta/models/",
+          model_name,
+          ":generateContent"
+        ),
+        add_headers(
+          "x-goog-api-key" = api_key,
+          "Content-Type" = "application/json"
+        ),
+        body = toJSON(body, auto_unbox = TRUE, null = "null"),
+        timeout(50)
+      )
+    }, error = function(e) {
+      message("Request error for ", Code, ": ", e$message)
+      NULL
+    })
+    
+    # If the request itself failed, retry
+    if (is.null(response)) {
+      retries <- retries + 1
+      Sys.sleep(2^retries)
+      next
+    }
+    
+    # --------------------------------------------------------
+    # Parse the raw HTTP response into an R object
+    # --------------------------------------------------------
+    parsed_response <- tryCatch(
+      content(response, as = "parsed", type = "application/json"),
+      error = function(e) NULL
+    )
+    
+    # --------------------------------------------------------
+    # Handle HTTP-level errors
+    # --------------------------------------------------------
+    if (status_code(response) >= 400) {
+      message("HTTP error ", status_code(response), " for ", Code)
+      
+      if (!is.null(parsed_response$error$message)) {
+        message("API message: ", parsed_response$error$message)
+      }
+      
+      retries <- retries + 1
+      Sys.sleep(2^retries)
+      next
+    }
+    
+    # --------------------------------------------------------
+    # Extract the textual content returned by the model
+    # --------------------------------------------------------
+    response_text <- safe_extract_text(parsed_response)
+    
+    if (is.null(response_text) || response_text == "") {
+      message("Empty response text for ", Code)
+      retries <- retries + 1
+      Sys.sleep(2^retries)
+      next
+    }
+    
+    # Print model output for debugging / transparency
+    print(response_text)
+    
+    # --------------------------------------------------------
+    # Parse the model output as JSON
+    # --------------------------------------------------------
+    parsed_json <- safe_parse_json(response_text)
+    
+    if (is.null(parsed_json)) {
+      message("Invalid JSON returned for ", Code)
+      retries <- retries + 1
+      Sys.sleep(2^retries)
+      next
+    }
+    
+    # --------------------------------------------------------
+    # Extract and normalize each field returned by the model
+    # --------------------------------------------------------
+    
+    # Screening decision
+    result$Decision <- normalize_field(
+      parsed_json$decision,
+      allowed = c("accepted", "rejected", "unsure"),
+      default = "unsure"
+    )
+    
+    # Short reason for the decision
+    result$Reason <- ifelse(
+      is.null(parsed_json$reason),
+      "",
+      as.character(parsed_json$reason)
+    )
+    
+    # Integration type:
+    # conceptual / analytical / sequential / soft_coupling / strong_coupling / unclear
+    result$IntegrationType <- normalize_field(
+      parsed_json$integration_type,
+      allowed = c(
+        "conceptual",
+        "analytical",
+        "sequential",
+        "soft_coupling",
+        "strong_coupling",
+        "unclear"
+      ),
+      default = "unclear"
+    )
+    
+    # Spatial scale:
+    # local / regional / supraregional / multiple / unclear
+    result$SpatialScale <- normalize_field(
+      parsed_json$spatial_scale,
+      allowed = c("local", "regional", "supraregional", "multiple", "unclear"),
+      default = "unclear"
+    )
+    
+    # Method type:
+    # empirical / modeling / review / conceptual / mixed / unclear
+    result$MethodType <- normalize_field(
+      parsed_json$method_type,
+      allowed = c("empirical", "modeling", "review", "conceptual", "mixed", "unclear"),
+      default = "unclear"
+    )
+    
+    # Interaction direction:
+    # transport_to_ecosystem / ecosystem_to_transport / bidirectional / unclear
+    result$InteractionDirection <- normalize_field(
+      parsed_json$interaction_direction,
+      allowed = c("transport_to_ecosystem", "ecosystem_to_transport", "bidirectional", "unclear"),
+      default = "unclear"
+    )
+    
+    # Whether ecological connectivity is central in the paper
+    result$ConnectivityFocus <- normalize_field(
+      parsed_json$connectivity_focus,
+      allowed = c("yes", "no", "partial", "unclear"),
+      default = "unclear"
+    )
+    
+    # Additional notes
+    result$Notes <- ifelse(
+      is.null(parsed_json$notes),
+      "",
+      as.character(parsed_json$notes)
+    )
+    
+    # Mark as valid and exit the retry loop
+    valid_response_received <- TRUE
+  }
+  
+  # ----------------------------------------------------------
+  # Update progress counter and print completion status
+  # ----------------------------------------------------------
+  .GlobalEnv$counter <- .GlobalEnv$counter + 1
+  percentage_completion <- (.GlobalEnv$counter / total_n) * 100
+  
+  message(
+    round(percentage_completion, 2),
+    "% completed - ",
+    Code,
+    " -> ",
+    result$Decision
+  )
+  
+  return(result)
+}
+
+# ------------------------------------------------------------
+# 9. READ THE INPUT DATASET
+# ------------------------------------------------------------
+
+# Read the CSV file containing your paper dataset.
+#
+# IMPORTANT:
+# If your file actually has a .csv extension, use:
+# "database_output_raw/scopus_export_prototype.csv"
+#
+# If your file has no extension, keep the current path as written below.
+data <- read.csv(
+  "database_output_raw/scopus_export_prototype",
+  stringsAsFactors = FALSE
+)
+
+# Print column names so you can inspect them if needed
+print(names(data))
+
+# ------------------------------------------------------------
+# 10. OPTIONAL COLUMN RENAMING
+# ------------------------------------------------------------
+#
+# Uncomment and adapt these lines if your CSV uses different column names.
+# For example, if Scopus exports them differently.
+#
+# names(data)[names(data) == "Document Title"] <- "Title"
+# names(data)[names(data) == "Abstract"] <- "Abstract"
+# names(data)[names(data) == "Year"] <- "Year"
+
+# ------------------------------------------------------------
+# 11. CLEAN THE DATA
+# ------------------------------------------------------------
+
+# Remove rows with missing or empty abstracts
 data <- data[!is.na(data$Abstract) & data$Abstract != "", ]
 
-# Apply the ChatGPT 3.5 turbo analysis function and store the results in a new data frame
-results <- mapply(analyze_text_with_chatgpt, data$Title, data$Abstract, SIMPLIFY = FALSE)
+# Remove rows with missing or empty titles
+data <- data[!is.na(data$Title) & data$Title != "", ]
 
-# Add the decisions and comments to the original data frame
+# If the dataset does not contain a Code column, create one automatically
+if (!"Code" %in% names(data)) {
+  data$Code <- paste0("P", seq_len(nrow(data)))
+}
+
+# ------------------------------------------------------------
+# 12. APPLY THE GEMINI ANALYSIS TO ALL PAPERS
+# ------------------------------------------------------------
+
+results <- mapply(
+  FUN = analyze_text_with_gemini,
+  Code = data$Code,
+  Title = data$Title,
+  Abstract = data$Abstract,
+  MoreArgs = list(total_n = nrow(data)),
+  SIMPLIFY = FALSE
+)
+
+# ------------------------------------------------------------
+# 13. ADD THE MODEL OUTPUT AS NEW COLUMNS
+# ------------------------------------------------------------
+
 data$Decision <- sapply(results, `[[`, "Decision")
-data$Comments <- sapply(results, `[[`, "Comment")
+data$Reason <- sapply(results, `[[`, "Reason")
+data$IntegrationType <- sapply(results, `[[`, "IntegrationType")
+data$SpatialScale <- sapply(results, `[[`, "SpatialScale")
+data$MethodType <- sapply(results, `[[`, "MethodType")
+data$InteractionDirection <- sapply(results, `[[`, "InteractionDirection")
+data$ConnectivityFocus <- sapply(results, `[[`, "ConnectivityFocus")
+data$Notes <- sapply(results, `[[`, "Notes")
 
-# Write results to a new CSV file
-write.table(data[, c("Code", "Title", "Decision", "Comments")], "output_text.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+# ------------------------------------------------------------
+# 14. DEFINE OUTPUT COLUMNS
+# ------------------------------------------------------------
+
+# Start with a core set of columns we definitely want in the output.
+output_cols <- c(
+  "Code",
+  "Title",
+  "Decision",
+  "Reason",
+  "IntegrationType",
+  "SpatialScale",
+  "MethodType",
+  "InteractionDirection",
+  "ConnectivityFocus",
+  "Notes"
+)
+
+# If Year exists in the input dataset, include it in the output.
+if ("Year" %in% names(data)) {
+  output_cols <- append(output_cols, "Year", after = 2)
+}
+
+# ------------------------------------------------------------
+# 15. WRITE THE OUTPUT FILE
+# ------------------------------------------------------------
+
+# Save the final screened and coded dataset as a tab-separated text file.
+# Tab-separated output is often safer than CSV because abstracts may contain commas.
+write.table(
+  data[, output_cols],
+  "output/screened_and_coded_output.txt",
+  sep = "\t",
+  row.names = FALSE,
+  quote = FALSE
+)
+
+# Optional: also save a CSV version if you want
+write.csv(
+  data[, output_cols],
+  "output/screened_and_coded_output.csv",
+  row.names = FALSE
+)
+
+# ------------------------------------------------------------
+# END OF SCRIPT
+# ------------------------------------------------------------
+message("Screening and coding completed successfully.")
