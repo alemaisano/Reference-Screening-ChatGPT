@@ -31,8 +31,8 @@ if (api_key == "") {
 # ------------------------------------------------------------
 
 # Define the Gemini model to use.
-# For your prototype, Gemini 2.5 Flash is a good balance of cost and speed.
-model_name <- "gemini-2.5-flash"
+# For your prototype, Gemini 2.5 Flash Lite is a good balance of cost and speed.
+model_name <- "gemini-2.5-flash-lite"
 
 # ------------------------------------------------------------
 # 3. GLOBAL COUNTER
@@ -396,8 +396,7 @@ analyze_text_with_gemini <- function(Code, Title, Abstract, total_n) {
 # "database_output_raw/scopus_export_prototype.csv"
 #
 # If your file has no extension, keep the current path as written below.
-data <- read.csv(
-  "database_output_raw/scopus_export_prototype",
+data <- read.csv("database_output_raw/scopus_export_prototype.csv",
   stringsAsFactors = FALSE
 )
 
