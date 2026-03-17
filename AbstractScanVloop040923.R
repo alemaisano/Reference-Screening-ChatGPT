@@ -1,7 +1,7 @@
 library(httr)
 library(jsonlite)
 
-# Define your OpenAI API key here
+# Define your LLM API key here
 api_key <- "sk-xxx"
 
 # Global counter variable
