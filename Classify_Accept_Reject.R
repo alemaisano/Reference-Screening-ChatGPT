@@ -17,7 +17,7 @@ if (api_key == "") stop("GROQ_API_KEY not found.")
 # ------------------------------------------------------------
 # 2. SETTINGS
 # ------------------------------------------------------------
-model_name          <- "openai/gpt-oss-120b"
+model_name          <- "meta-llama/llama-4-scout-17b-16e-instruct"
 batch_size          <- 3
 max_retries         <- 4
 request_timeout     <- 60
@@ -26,8 +26,8 @@ max_keywords_chars  <- 600
 sleep_between_calls <- 1   # 2 sec tra una call e l'altra
 
 input_file      <- "database_output_raw/scopus_export_prototype_1.csv"
-output_file_csv <- "output/screened_step1_groq2.csv"
-output_file_tsv <- "output/screened_step1_groq2.txt"
+output_file_csv <- "output/screened_step1.1_groq2.csv"
+output_file_tsv <- "output/screened_step1.1_groq2.txt"
 prompt_file     <- "prompts/prototype2_roadnet_biodconnectivity.txt"
 
 # ------------------------------------------------------------
@@ -234,7 +234,7 @@ analyze_batch <- function(batch_df) {
     
     if (status_code(response) == 429) {
       message("Rate limit — waiting 60s...")
-      Sys.sleep(60); retries <- retries + 1; next
+      Sys.sleep(10); retries <- retries + 1; next
     }
     if (status_code(response) >= 400) {
       message("HTTP ", status_code(response))
