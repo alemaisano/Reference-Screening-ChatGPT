@@ -16,20 +16,20 @@ if (api_key == "") stop("GROQ_API_KEY not found.")
 # 2. SETTINGS
 # ------------------------------------------------------------
 model_name          <- "meta-llama/llama-4-scout-17b-16e-instruct"
-batch_size          <- 3
+batch_size          <- 2
 max_retries         <- 4
 request_timeout     <- 60
 max_abstract_chars  <- 2500
 max_keywords_chars  <- 600
-sleep_between_calls <- 1
+sleep_between_calls <- 10
 
 input_file          <- "database_output_raw/scopus_export_prototype_1.csv"
-resume_file_csv     <- "output/screened_step1.1_groq2_resumed.csv"   # existing partial output
-output_file_csv     <- "output/screened_step1.1_groq2_resumed2.csv"
-output_file_tsv     <- "output/screened_step1.1_groq2_resumed2.txt"
+resume_file_csv     <- "output/screened_step1.1_groq2.csv"   # existing partial output
+output_file_csv     <- "output/screened_step1.1_groq2_resumed.csv"
+output_file_tsv     <- "output/screened_step1.1_groq2_resumed.txt"
 prompt_file         <- "prompts/prototype2_roadnet_biodconnectivity.txt"
 
-resume_from_code    <- "P750"
+resume_from_code    <- "P744"
 
 # ------------------------------------------------------------
 # 3. SYSTEM PROMPT
