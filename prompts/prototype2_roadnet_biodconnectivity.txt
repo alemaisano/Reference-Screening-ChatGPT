@@ -23,7 +23,6 @@ IMPORTANT DECISION RULE
 Use only:
 - accepted
 - rejected
-
 Do NOT use any other decision label.
 
 CONFIDENCE
@@ -32,35 +31,23 @@ Assign:
 - medium = decision is reasonable but some ambiguity remains
 - low = decision is weak or abstract is vague
 
-MANUAL CHECK
-Set needs_manual_check = "yes" if:
-- confidence is low
-- or the abstract is ambiguous
-- or the paper is borderline relevant
-- or roads/transport are only part of the broader landscape context
-- or connectivity is only indirectly addressed
-
-Set needs_manual_check = "no" if:
-- the decision is clear and well supported by the title/abstract/keywords
-
 STRICT RULES
 - Be conservative and literal.
 - Do not invent details.
 - Do not assume a modeling component if it is not stated.
 - Do not include papers just because they mention roads and ecology separately.
 - Focus on meaningful relevance to the review scope.
+- Return exactly one result per paper. Do not repeat any code.
 
 OUTPUT FORMAT
 Return ONLY valid JSON with exactly this structure:
-
 {
   "results": [
     {
       "code": "exact input ID",
       "decision": "accepted or rejected",
       "reason": "short explanation",
-      "confidence": "high or medium or low",
-      "needs_manual_check": "yes or no"
+      "confidence": "high or medium or low"
     }
   ]
 }

@@ -1,0 +1,46 @@
+{
+  "results": [
+       {
+           "code": "P00013",
+           "decision": "accepted",
+           "reason": "The paper analyzes the impact of a bridge on steelhead smolt migration, which is relevant to both road ecology and biodiversity connectivity.",
+           "confidence": "high",
+           "needs_manual_check": "no"
+       },
+       {
+           "code": "P00014",
+           "decision": "accepted",
+           "reason": "The paper presents a framework for urban amphibian conservation, including the identification of movement corridors and barriers, which is relevant to both road ecology and biodiversity connectivity.",
+           "confidence": "high",
+           "needs_manual_check": "no"
+       },
+       {
+           "code": "P00015",
+           "decision": "accepted",
+           "reason": "The paper proposes a framework to evaluate the impacts of shale gas infrastructures, including roads, on forest fragmentation, which is relevant to both road ecology and biodiversity connectivity.",
+           "confidence": "high",
+           "needs_manual_check": "no"
+       },
+       {
+           "code": "P00016",
+           "decision": "accepted",
+           "reason": "The paper analyzes the genetic impact of road-based habitat fragmentation on Eastern Box Turtles, which is relevant to both road ecology and biodiversity connectivity.",
+           "confidence": "high",
+           "needs_manual_check": "no"
+       },
+       {
+           "code": "P00017",
+           "decision": "accepted",
+           "reason": "The paper evaluates the genetic structure of moose populations in relation to fenced transportation infrastructure, which is relevant to both road ecology and biodiversity connectivity.",
+           "confidence": "high",
+           "needs_manual_check": "no"
+       },
+       {
+           "code": "P00018",
+           "decision": "accepted",
+           "reason": "The paper presents a GIS-based assessment tool for biodiversity conservation, including the evaluation of road alternatives, which is relevant to both road ecology and biodiversity connectivity.",
+           "confidence": "high",
+           "needs_manual_check": "no"
+       }
+   ]
+}
