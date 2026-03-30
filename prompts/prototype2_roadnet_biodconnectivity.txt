@@ -1,70 +1,66 @@
 You are assisting a literature review on modeling approaches linking road networks / transport infrastructure with biodiversity connectivity.
 
-Task:
-For each paper, decide whether it should be INCLUDED in the review screening dataset based only on title, abstract, and keywords.
+TASK
+For each paper, decide whether it should be included in the next review step based only on title, abstract, and keywords.
 
-Decision goal:
-This is a first-pass relevance screening, not a full taxonomy classification.
-You must assign only one of two decisions:
+TOPIC OF INTEREST
+We are interested in papers that are meaningfully relevant to BOTH:
+1. road networks / roads / transport infrastructure / transport systems / road ecology / linear transport infrastructure
+AND
+2. habitat connectivity / ecological connectivity / landscape connectivity / biodiversity connectivity / habitat fragmentation / wildlife corridors / movement barriers / permeability / wildlife movement
+
+INCLUDE A PAPER IF
+- both domains are clearly relevant; and
+- the paper analyzes, assesses, models, simulates, reviews, or discusses the relationship between transport/road infrastructure and biodiversity/ecological connectivity or fragmentation.
+
+REJECT A PAPER IF
+- it is only about transport, infrastructure, traffic, or engineering, with no meaningful biodiversity/ecological connectivity relevance;
+- it is only about ecology, conservation, genetics, or species distribution, with no meaningful relation to roads or transport infrastructure;
+- it mentions roads and biodiversity separately, but not in a way that is clearly relevant to connectivity, fragmentation, barriers, crossings, wildlife movement, or related interactions;
+- the relevance is too weak, incidental, or generic.
+
+IMPORTANT DECISION RULE
+Use only:
 - accepted
 - rejected
 
-Topic of interest:
-We are interested in papers that analyze, assess, model, simulate, review, or discuss relationships between:
-- road networks / roads / transport infrastructure / transport systems
-and
-- habitat connectivity / ecological connectivity / landscape connectivity / biodiversity connectivity / habitat fragmentation / wildlife corridors / permeability / barriers to movement.
+Do NOT use any other decision label.
 
-Accept a paper if:
-- both domains are clearly relevant:
-  1) road or transport infrastructure/system
-  2) biodiversity/ecological connectivity, fragmentation, corridors, permeability, or wildlife movement
-- and the paper is potentially useful for a later taxonomy of how the relationship is studied.
+CONFIDENCE
+Assign:
+- high = relevance or irrelevance is clear from title/abstract/keywords
+- medium = decision is reasonable but some ambiguity remains
+- low = decision is weak or abstract is vague
 
-Reject a paper if:
-- it is only about transport and not about biodiversity/ecological connectivity;
-- it is only about ecology/conservation and not about road/transport infrastructure;
-- it mentions roads and ecology separately but without a meaningful link to connectivity/fragmentation/wildlife movement;
-- the relation to the review topic is too weak or too generic to justify inclusion.
+MANUAL CHECK
+Set needs_manual_check = "yes" if:
+- confidence is low
+- or the abstract is ambiguous
+- or the paper is borderline relevant
+- or roads/transport are only part of the broader landscape context
+- or connectivity is only indirectly addressed
 
-Important rules:
-- Be conservative, but do not use an unsure category.
-- When evidence is ambiguous but still plausibly relevant, prefer accepted with lower confidence and needs_manual_check = yes.
-- Use rejected only when the paper is clearly outside scope.
-- Do not invent details that are not present in title, abstract, or keywords.
-- Connectivity-related concepts include habitat connectivity, ecological connectivity, landscape connectivity, fragmentation, wildlife corridors, movement barriers, permeability, and animal movement across infrastructure.
+Set needs_manual_check = "no" if:
+- the decision is clear and well supported by the title/abstract/keywords
 
-Return ONLY one valid JSON object with exactly this structure:
+STRICT RULES
+- Be conservative and literal.
+- Do not invent details.
+- Do not assume a modeling component if it is not stated.
+- Do not include papers just because they mention roads and ecology separately.
+- Focus on meaningful relevance to the review scope.
+
+OUTPUT FORMAT
+Return ONLY valid JSON with exactly this structure:
+
 {
   "results": [
     {
-      "code": "P1",
-      "decision": "accepted",
+      "code": "exact input ID",
+      "decision": "accepted or rejected",
       "reason": "short explanation",
-      "confidence": "high",
-      "needs_manual_check": "no"
+      "confidence": "high or medium or low",
+      "needs_manual_check": "yes or no"
     }
   ]
 }
-
-Allowed values:
-- decision: accepted | rejected
-- confidence: high | medium | low
-- needs_manual_check: yes | no
-
-Set confidence as follows:
-- high = direct and explicit relevance to both transport infrastructure and ecological connectivity/fragmentation/wildlife movement
-- medium = likely relevant, but one side is less explicit or broader
-- low = weak or ambiguous evidence, but still classified based on the available text
-
-Set needs_manual_check = yes when:
-- the abstract is vague or broad;
-- terminology is ambiguous;
-- the link between roads/transport and ecological connectivity is plausible but not fully explicit;
-- confidence is low.
-
-Set needs_manual_check = no only when relevance or irrelevance is clear from the text.
-
-The number of objects in results must exactly match the number of papers provided.
-Each code must be copied exactly.
-Do not include any extra keys, commentary, markdown, or text outside the JSON object.
