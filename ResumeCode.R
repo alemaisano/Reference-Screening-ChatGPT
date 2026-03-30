@@ -1,8 +1,6 @@
 # ============================================================
 # Step 1 — LLM-assisted screening pipeline
-# Topic: road networks + biodiversity / ecological connectivity
-# Provider: Groq  |  Model: llama-3.3-70b-versatile
-# Strategy: 3 papers per request, structured output
+# Resume from P744 onward without overwriting previous rows
 # ============================================================
 
 library(httr)
@@ -23,12 +21,15 @@ max_retries         <- 4
 request_timeout     <- 60
 max_abstract_chars  <- 2500
 max_keywords_chars  <- 600
-sleep_between_calls <- 1   # 2 sec tra una call e l'altra
+sleep_between_calls <- 1
 
-input_file      <- "database_output_raw/scopus_export_prototype_1.csv"
-output_file_csv <- "output/screened_step1.1_groq2.csv"
-output_file_tsv <- "output/screened_step1.1_groq2.txt"
-prompt_file     <- "prompts/prototype2_roadnet_biodconnectivity.txt"
+input_file          <- "database_output_raw/scopus_export_prototype_1.csv"
+resume_file_csv     <- "output/screened_step1.1_groq2_resumed.csv"   # existing partial output
+output_file_csv     <- "output/screened_step1.1_groq2_resumed2.csv"
+output_file_tsv     <- "output/screened_step1.1_groq2_resumed2.txt"
+prompt_file         <- "prompts/prototype2_roadnet_biodconnectivity.txt"
+
+resume_from_code    <- "P750"
 
 # ------------------------------------------------------------
 # 3. SYSTEM PROMPT
@@ -47,8 +48,9 @@ truncate_text <- function(x, max_chars) {
 }
 
 normalize_field <- function(value, allowed = NULL, default = NA_character_) {
-  if (is.null(value) || length(value) == 0 || is.na(value) || trimws(value) == "")
+  if (is.null(value) || length(value) == 0 || is.na(value) || trimws(value) == "") {
     return(default)
+  }
   value <- trimws(tolower(as.character(value)))
   if (!is.null(allowed) && !(value %in% allowed)) return(default)
   value
@@ -96,9 +98,7 @@ build_response_schema <- function(batch_df) {
                   type = "string",
                   enum = list("accepted", "rejected")
                 ),
-                reason = list(
-                  type = "string"
-                ),
+                reason = list(type = "string"),
                 confidence = list(
                   type = "string",
                   enum = list("high", "medium", "low")
@@ -123,6 +123,7 @@ build_batch_prompt <- function(batch_df) {
     "ABSTRACT: ",   batch_df$Abstract,
     collapse = "\n\n--------------------\n\n"
   )
+  
   paste0(
     "Screen the following ", nrow(batch_df), " papers.\n",
     "Return exactly one result per paper using the paper code as provided.\n\n",
@@ -134,11 +135,13 @@ build_batch_prompt <- function(batch_df) {
 # 7. STANDARDIZE PARSED OUTPUT
 # ------------------------------------------------------------
 standardize_batch_output <- function(parsed_json, batch_df, raw_response = "") {
-  if (is.null(parsed_json))
+  if (is.null(parsed_json)) {
     return(build_fallback_batch(batch_df, raw_response, "parsed_json_null"))
+  }
   
-  if (!is.list(parsed_json) || is.null(parsed_json$results))
+  if (!is.list(parsed_json) || is.null(parsed_json$results)) {
     return(build_fallback_batch(batch_df, raw_response, "missing_results_array"))
+  }
   
   results_df <- parsed_json$results
   
@@ -147,19 +150,21 @@ standardize_batch_output <- function(parsed_json, batch_df, raw_response = "") {
       as.data.frame(results_df, stringsAsFactors = FALSE),
       error = function(e) NULL
     )
-    if (is.null(results_df))
+    if (is.null(results_df)) {
       return(build_fallback_batch(batch_df, raw_response, "results_not_dataframe"))
+    }
   }
   
   required_cols <- c("code", "decision", "reason", "confidence")
   missing_cols  <- setdiff(required_cols, names(results_df))
-  if (length(missing_cols) > 0)
+  if (length(missing_cols) > 0) {
     return(build_fallback_batch(
       batch_df, raw_response,
       paste("missing_cols:", paste(missing_cols, collapse = ","))
     ))
+  }
   
-  results_df      <- results_df[, required_cols, drop = FALSE]
+  results_df <- results_df[, required_cols, drop = FALSE]
   results_df$code <- as.character(results_df$code)
   
   merged <- merge(
@@ -175,13 +180,14 @@ standardize_batch_output <- function(parsed_json, batch_df, raw_response = "") {
     merged$decision, normalize_field, character(1),
     allowed = c("accepted", "rejected"), default = "error"
   )
-  merged$ScreeningReason <- ifelse(
-    is.na(merged$reason), "", as.character(merged$reason)
-  )
+  
+  merged$ScreeningReason <- ifelse(is.na(merged$reason), "", as.character(merged$reason))
+  
   merged$ScreeningConfidence <- vapply(
     merged$confidence, normalize_field, character(1),
     allowed = c("high", "medium", "low"), default = "low"
   )
+  
   merged$RawModelOutput <- raw_response
   
   merged$ScreeningDecision[is.na(merged$ScreeningDecision)]     <- "error"
@@ -193,14 +199,13 @@ standardize_batch_output <- function(parsed_json, batch_df, raw_response = "") {
 }
 
 # ------------------------------------------------------------
-# 8. API CALL
+# 8. API CALL CON ATTESA DINAMICA (RATE LIMIT)
 # ------------------------------------------------------------
 analyze_batch <- function(batch_df) {
-  retries           <- 0
+  retries <- 0
   raw_response_text <- ""
   
   while (retries < max_retries) {
-    
     body <- list(
       model           = model_name,
       temperature     = 0,
@@ -221,45 +226,59 @@ analyze_batch <- function(batch_df) {
         body    = toJSON(body, auto_unbox = TRUE, null = "null"),
         timeout(request_timeout)
       )
-    }, error = function(e) { message("Request error: ", e$message); NULL })
+    }, error = function(e) {
+      message("Request error: ", e$message)
+      NULL
+    })
     
     if (is.null(response)) {
-      retries <- retries + 1; Sys.sleep(5 * retries); next
+      retries <- retries + 1
+      Sys.sleep(5 * retries)
+      next
     }
     
-    parsed_response <- tryCatch(
-      content(response, as = "parsed", type = "application/json"),
-      error = function(e) NULL
-    )
-    
+    # --- GESTIONE RATE LIMIT (HTTP 429) ---
     if (status_code(response) == 429) {
-      err_content <- content(response, as = "parsed")
-      msg <- err_content$error$message
-      # Estrai il tempo di attesa dal messaggio "try again in X.Xs"
-      wait_match <- regexec("in ([0-9\\.]+)s", msg)
-      wait_val <- regmatches(msg, wait_match)[[1]][2]
-      wait_time <- if(!is.na(wait_val)) as.numeric(wait_val) + 1.5 else 15
+      # Prova a leggere l'header 'retry-after' (spesso è vuoto su Groq)
+      wait_time <- as.numeric(headers(response)[["retry-after"]])
       
-      message("!!! Rate Limit: attendo ", wait_time, " secondi...")
+      # Se manca, estraiamo i secondi dal messaggio di errore JSON
+      if (is.na(wait_time)) {
+        err_content <- content(response, as = "parsed")
+        err_msg <- err_content$error$message
+        
+        # Cerca pattern come "in 1.5s" o "in 15s" nel messaggio di Groq
+        wait_match <- regexec("in ([0-9\\.]+)s", err_msg)
+        wait_val <- regmatches(err_msg, wait_match)[[1]][2]
+        
+        if (!is.na(wait_val)) {
+          wait_time <- as.numeric(wait_val)
+        } else {
+          wait_time <- 20 # Fallback prudente se non trova il tempo nel testo
+        }
+      }
+      
+      # Aggiungiamo un margine di sicurezza di 1 secondo
+      wait_time <- wait_time + 1
+      
+      message("!!! Rate Limit !!! Groq richiede attesa di ", wait_time, " secondi...")
       Sys.sleep(wait_time)
-      retries <- retries + 1; next
+      retries <- retries + 1
+      next
     }
+    
+    # --- ALTRI ERRORI HTTP ---
     if (status_code(response) >= 400) {
-      message("HTTP ", status_code(response))
-      if (!is.null(parsed_response$error$message))
-        message("API: ", parsed_response$error$message)
-      retries <- retries + 1; Sys.sleep(5 * retries); next
+      parsed_err <- content(response, as = "parsed")
+      message("HTTP Error ", status_code(response), ": ", parsed_err$error$message)
+      retries <- retries + 1
+      Sys.sleep(5 * retries)
+      next
     }
     
-    raw_response_text <- tryCatch(
-      parsed_response$choices[[1]]$message$content,
-      error = function(e) NULL
-    )
-    
-    if (is.null(raw_response_text) || raw_response_text == "") {
-      message("Empty response — batch starting with ", batch_df$Code[1])
-      retries <- retries + 1; Sys.sleep(5 * retries); next
-    }
+    # --- PARSING OK ---
+    parsed_response <- content(response, as = "parsed")
+    raw_response_text <- parsed_response$choices[[1]]$message$content
     
     parsed_json <- tryCatch(
       fromJSON(raw_response_text, simplifyDataFrame = TRUE),
@@ -267,28 +286,31 @@ analyze_batch <- function(batch_df) {
     )
     
     if (is.null(parsed_json)) {
-      message("Invalid JSON — batch starting with ", batch_df$Code[1])
-      retries <- retries + 1; Sys.sleep(5 * retries); next
+      message("JSON non valido. Riprovo...")
+      retries <- retries + 1
+      Sys.sleep(2)
+      next
     }
     
-    message("Response OK — batch starting with ", batch_df$Code[1])
+    message("Batch OK | Partenza da: ", batch_df$Code[1])
     Sys.sleep(sleep_between_calls)
     return(standardize_batch_output(parsed_json, batch_df, raw_response_text))
   }
   
-  build_fallback_batch(batch_df, raw_response_text, "max_retries_reached")
+  build_fallback_batch(batch_df, raw_response_text, "max_retries_reached_rate_limit")
 }
 
 # ------------------------------------------------------------
-# 9. LOAD & PREPARE DATA
+# 9. LOAD RAW DATA
 # ------------------------------------------------------------
 data <- read.csv(input_file, stringsAsFactors = FALSE)
 message("Columns found: ", paste(names(data), collapse = ", "))
 
 required_input_cols <- c("Title", "Abstract")
 missing_input_cols  <- setdiff(required_input_cols, names(data))
-if (length(missing_input_cols) > 0)
+if (length(missing_input_cols) > 0) {
   stop("Missing columns: ", paste(missing_input_cols, collapse = ", "))
+}
 
 if (!"Keywords" %in% names(data)) data$Keywords <- ""
 
@@ -309,40 +331,76 @@ data$ScreeningConfidence <- NA_character_
 data$RawModelOutput      <- NA_character_
 
 # ------------------------------------------------------------
-# 11. MAIN LOOP WITH RESUME
+# 11. LOAD PREVIOUS OUTPUT AND MERGE
 # ------------------------------------------------------------
-n            <- nrow(data)
-batch_starts <- seq(1, n, by = batch_size)
+if (file.exists(resume_file_csv)) {
+  old <- read.csv(resume_file_csv, stringsAsFactors = FALSE)
+  
+  keep_cols <- c("Code", "ScreeningDecision", "ScreeningReason",
+                 "ScreeningConfidence", "RawModelOutput")
+  keep_cols <- intersect(keep_cols, names(old))
+  
+  old <- old[, keep_cols, drop = FALSE]
+  
+  idx <- match(data$Code, old$Code)
+  
+  data$ScreeningDecision   <- old$ScreeningDecision[idx]
+  data$ScreeningReason     <- old$ScreeningReason[idx]
+  data$ScreeningConfidence <- old$ScreeningConfidence[idx]
+  data$RawModelOutput      <- old$RawModelOutput[idx]
+  
+  message("Loaded previous output from: ", resume_file_csv)
+} else {
+  stop("Resume file not found: ", resume_file_csv)
+}
+
+# ------------------------------------------------------------
+# 12. FIND START ROW
+# ------------------------------------------------------------
+start_resume_idx <- match(resume_from_code, data$Code)
+if (is.na(start_resume_idx)) {
+  stop("resume_from_code not found in data: ", resume_from_code)
+}
+
+message("Resuming from code ", resume_from_code, " at row ", start_resume_idx)
+
+# ------------------------------------------------------------
+# 13. MAIN LOOP - SOVRASCRITTURA FORZATA DA START_RESUME_IDX
+# ------------------------------------------------------------
+n <- nrow(data)
+batch_starts <- seq(start_resume_idx, n, by = batch_size)
 
 for (start_idx in batch_starts) {
-  end_idx  <- min(start_idx + batch_size - 1, n)
+  end_idx <- min(start_idx + batch_size - 1, n)
+  batch_codes <- data$Code[start_idx:end_idx]
   
-  # Resume: salta batch già completati interamente
-  if (all(!is.na(data$ScreeningDecision[start_idx:end_idx]))) {
-    message("Skipping already processed batch: rows ", start_idx, " – ", end_idx)
-    next
-  }
+  # NOTA: Qui ho rimosso il controllo "if (all(!is.na(...))) next"
+  # Questo assicura che da P744 in poi il codice esegua SEMPRE l'API
   
   batch_df <- data[start_idx:end_idx,
                    c("Code", "Title", "Keywords", "Abstract"),
                    drop = FALSE]
   
-  message("Batch: rows ", start_idx, " – ", end_idx,
-          " (", nrow(batch_df), " papers)")
+  message("--- Elaborazione Batch: righe ", start_idx, " – ", end_idx, 
+          " | Codes: ", paste(batch_codes, collapse = ", "))
   
   batch_results <- analyze_batch(batch_df)
-  match_idx     <- match(batch_results$Code, data$Code)
+  
+  # Mappatura precisa basata sul codice per sovrascrivere nel dataframe principale
+  match_idx <- match(batch_results$Code, data$Code)
   
   data$ScreeningDecision[match_idx]   <- batch_results$ScreeningDecision
   data$ScreeningReason[match_idx]     <- batch_results$ScreeningReason
   data$ScreeningConfidence[match_idx] <- batch_results$ScreeningConfidence
   data$RawModelOutput[match_idx]      <- batch_results$RawModelOutput
   
+  # Salvataggio immediato (sovrascrive il file di output a ogni batch)
   write.csv(data, output_file_csv, row.names = FALSE)
   write.table(data, output_file_tsv, sep = "\t", row.names = FALSE, quote = FALSE)
   
-  message(round(end_idx / n * 100, 1), "% — decisions: ",
+  progress <- round(end_idx / n * 100, 1)
+  message(progress, "% completato. Decisioni: ", 
           paste(batch_results$ScreeningDecision, collapse = ", "))
 }
 
-message("Screening completato.")
+message("Screening terminato con sovrascrittura da ", resume_from_code, " in poi.")
