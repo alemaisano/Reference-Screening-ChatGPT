@@ -1,6 +1,6 @@
 # ============================================================
 # Step 1 — LLM-assisted screening pipeline
-# Resume from P744 onward without overwriting previous rows
+# Resume from specified code onward with robust rate limiting
 # ============================================================
 
 library(httr)
@@ -16,20 +16,20 @@ if (api_key == "") stop("GROQ_API_KEY not found.")
 # 2. SETTINGS
 # ------------------------------------------------------------
 model_name          <- "meta-llama/llama-4-scout-17b-16e-instruct"
-batch_size          <- 2
-max_retries         <- 4
-request_timeout     <- 60
+batch_size          <- 1
+max_retries         <- 6
+request_timeout     <- 90
 max_abstract_chars  <- 2500
 max_keywords_chars  <- 600
-sleep_between_calls <- 10
+sleep_between_calls <- 60  # 1 minuto tra chiamate
 
 input_file          <- "database_output_raw/scopus_export_prototype_1.csv"
-resume_file_csv     <- "output/screened_step1.1_groq2.csv"   # existing partial output
-output_file_csv     <- "output/screened_step1.1_groq2_resumed.csv"
-output_file_tsv     <- "output/screened_step1.1_groq2_resumed.txt"
+resume_file_csv     <- "output/screened_step1.1_groq2_resumed6.csv"
+output_file_csv     <- "output/screened_step1.1_groq2_resumed7.csv"
+output_file_tsv     <- "output/screened_step1.1_groq2_resumed7.txt"
 prompt_file         <- "prompts/prototype2_roadnet_biodconnectivity.txt"
 
-resume_from_code    <- "P744"
+resume_from_code    <- "P1046"
 
 # ------------------------------------------------------------
 # 3. SYSTEM PROMPT
@@ -199,11 +199,12 @@ standardize_batch_output <- function(parsed_json, batch_df, raw_response = "") {
 }
 
 # ------------------------------------------------------------
-# 8. API CALL CON ATTESA DINAMICA (RATE LIMIT)
+# 8. API CALL CON RATE LIMIT ROBUSTO
 # ------------------------------------------------------------
 analyze_batch <- function(batch_df) {
   retries <- 0
   raw_response_text <- ""
+  base_wait <- 60  # Attesa base in secondi
   
   while (retries < max_retries) {
     body <- list(
@@ -232,47 +233,62 @@ analyze_batch <- function(batch_df) {
     })
     
     if (is.null(response)) {
+      wait_time <- base_wait * (2 ^ retries)  # Backoff esponenziale
+      message("Errore connessione, attesa ", wait_time, " secondi...")
+      Sys.sleep(wait_time)
       retries <- retries + 1
-      Sys.sleep(5 * retries)
       next
     }
     
     # --- GESTIONE RATE LIMIT (HTTP 429) ---
     if (status_code(response) == 429) {
-      # Prova a leggere l'header 'retry-after' (spesso è vuoto su Groq)
       wait_time <- as.numeric(headers(response)[["retry-after"]])
       
-      # Se manca, estraiamo i secondi dal messaggio di errore JSON
       if (is.na(wait_time)) {
-        err_content <- content(response, as = "parsed")
-        err_msg <- err_content$error$message
+        err_content <- tryCatch(content(response, as = "parsed"), error = function(e) NULL)
         
-        # Cerca pattern come "in 1.5s" o "in 15s" nel messaggio di Groq
-        wait_match <- regexec("in ([0-9\\.]+)s", err_msg)
-        wait_val <- regmatches(err_msg, wait_match)[[1]][2]
+        if (!is.null(err_content) && !is.null(err_content$error$message)) {
+          err_msg <- err_content$error$message
+          
+          # Pattern matching per "in X.Xs"
+          wait_match <- regexec("in ([0-9\\.]+)s", err_msg)
+          matches <- regmatches(err_msg, wait_match)
+          
+          if (length(matches[[1]]) > 1) {
+            wait_val <- matches[[1]][2]
+            wait_time <- as.numeric(wait_val)
+          }
+        }
         
-        if (!is.na(wait_val)) {
-          wait_time <- as.numeric(wait_val)
-        } else {
-          wait_time <- 20 # Fallback prudente se non trova il tempo nel testo
+        # Se ancora NA, usa fallback aggressivo
+        if (is.na(wait_time)) {
+          wait_time <- base_wait * (1.5 ^ retries)
         }
       }
       
-      # Aggiungiamo un margine di sicurezza di 1 secondo
-      wait_time <- wait_time + 1
+      # Margine di sicurezza + backoff
+      wait_time <- wait_time + 10 + (retries * 5)
       
-      message("!!! Rate Limit !!! Groq richiede attesa di ", wait_time, " secondi...")
+      message("!!! RATE LIMIT !!! Attesa ", round(wait_time, 1), 
+              " secondi (tentativo ", retries + 1, "/", max_retries, ")...")
       Sys.sleep(wait_time)
+      
       retries <- retries + 1
       next
     }
     
     # --- ALTRI ERRORI HTTP ---
     if (status_code(response) >= 400) {
-      parsed_err <- content(response, as = "parsed")
-      message("HTTP Error ", status_code(response), ": ", parsed_err$error$message)
+      parsed_err <- tryCatch(content(response, as = "parsed"), error = function(e) NULL)
+      err_msg <- if (!is.null(parsed_err$error$message)) parsed_err$error$message else "Unknown error"
+      
+      message("HTTP Error ", status_code(response), ": ", err_msg)
+      
+      wait_time <- base_wait * (1.5 ^ retries)
+      message("Attesa ", wait_time, " secondi prima del retry...")
+      Sys.sleep(wait_time)
+      
       retries <- retries + 1
-      Sys.sleep(5 * retries)
       next
     }
     
@@ -282,21 +298,24 @@ analyze_batch <- function(batch_df) {
     
     parsed_json <- tryCatch(
       fromJSON(raw_response_text, simplifyDataFrame = TRUE),
-      error = function(e) NULL
+      error = function(e) {
+        message("JSON parse error: ", e$message)
+        NULL
+      }
     )
     
     if (is.null(parsed_json)) {
       message("JSON non valido. Riprovo...")
+      Sys.sleep(5)
       retries <- retries + 1
-      Sys.sleep(2)
       next
     }
     
-    message("Batch OK | Partenza da: ", batch_df$Code[1])
-    Sys.sleep(sleep_between_calls)
+    message("✓ Batch OK | Codice inizio: ", batch_df$Code[1])
     return(standardize_batch_output(parsed_json, batch_df, raw_response_text))
   }
   
+  message("✗ Max retries raggiunto per batch: ", batch_df$Code[1])
   build_fallback_batch(batch_df, raw_response_text, "max_retries_reached_rate_limit")
 }
 
@@ -365,42 +384,63 @@ if (is.na(start_resume_idx)) {
 message("Resuming from code ", resume_from_code, " at row ", start_resume_idx)
 
 # ------------------------------------------------------------
-# 13. MAIN LOOP - SOVRASCRITTURA FORZATA DA START_RESUME_IDX
+# 13. MAIN LOOP CON THROTTLING ROBUSTO
 # ------------------------------------------------------------
 n <- nrow(data)
 batch_starts <- seq(start_resume_idx, n, by = batch_size)
+last_api_call <- Sys.time() - 61  # Inizializza nel passato
 
 for (start_idx in batch_starts) {
   end_idx <- min(start_idx + batch_size - 1, n)
   batch_codes <- data$Code[start_idx:end_idx]
   
-  # NOTA: Qui ho rimosso il controllo "if (all(!is.na(...))) next"
-  # Questo assicura che da P744 in poi il codice esegua SEMPRE l'API
-  
   batch_df <- data[start_idx:end_idx,
                    c("Code", "Title", "Keywords", "Abstract"),
                    drop = FALSE]
   
-  message("--- Elaborazione Batch: righe ", start_idx, " – ", end_idx, 
-          " | Codes: ", paste(batch_codes, collapse = ", "))
+  message("\n========================================")
+  message("Batch: righe ", start_idx, "–", end_idx)
+  message("Codes: ", paste(batch_codes, collapse = ", "))
+  message("========================================")
   
+  # THROTTLING FORZATO
+  elapsed <- as.numeric(difftime(Sys.time(), last_api_call, units = "secs"))
+  min_wait <- sleep_between_calls
+  
+  if (elapsed < min_wait) {
+    wait_needed <- min_wait - elapsed
+    message("⏳ Throttling: attesa ", round(wait_needed, 1), " secondi...")
+    Sys.sleep(wait_needed)
+  }
+  
+  # API CALL
   batch_results <- analyze_batch(batch_df)
+  last_api_call <- Sys.time()
   
-  # Mappatura precisa basata sul codice per sovrascrivere nel dataframe principale
+  # Update data
   match_idx <- match(batch_results$Code, data$Code)
-  
   data$ScreeningDecision[match_idx]   <- batch_results$ScreeningDecision
   data$ScreeningReason[match_idx]     <- batch_results$ScreeningReason
   data$ScreeningConfidence[match_idx] <- batch_results$ScreeningConfidence
   data$RawModelOutput[match_idx]      <- batch_results$RawModelOutput
   
-  # Salvataggio immediato (sovrascrive il file di output a ogni batch)
+  # Save immediately
   write.csv(data, output_file_csv, row.names = FALSE)
   write.table(data, output_file_tsv, sep = "\t", row.names = FALSE, quote = FALSE)
   
   progress <- round(end_idx / n * 100, 1)
-  message(progress, "% completato. Decisioni: ", 
-          paste(batch_results$ScreeningDecision, collapse = ", "))
+  message("✓ ", progress, "% completato")
+  message("Decisioni: ", paste(batch_results$ScreeningDecision, collapse = ", "))
+  
+  # PAUSA EXTRA OGNI 10 BATCH
+  batch_number <- which(batch_starts == start_idx)
+  if ((batch_number %% 10) == 0) {
+    message("⏸️  Pausa extra di 30 secondi ogni 10 batch...")
+    Sys.sleep(30)
+  }
 }
 
-message("Screening terminato con sovrascrittura da ", resume_from_code, " in poi.")
+message("\n========================================")
+message("✓ Screening completato!")
+message("File output: ", output_file_csv)
+message("========================================")
